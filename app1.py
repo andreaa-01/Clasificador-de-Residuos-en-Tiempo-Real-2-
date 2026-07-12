@@ -1,5 +1,4 @@
 import streamlit as st
-import tensorflow as tf
 from PIL import Image, ImageOps
 import numpy as np
 import os
@@ -12,27 +11,29 @@ st.set_page_config(
 )
 
 st.title("🧠 Clasificador de Imágenes en Tiempo Real")
-st.write("Carga una imagen y el modelo entrenado en Teachable Machine realizará la predicción.")
+st.write("Carga una imagen y el modelo entrenado realizará la predicción de forma local.")
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-# Función optimizada con parches de compatibilidad automáticos para Keras 3 en la nube
-@st.cache_resource
-def load_teachable_model():
+# Intentar cargar usando ONNX (Estándar de servidores ligeros)
+def load_onnx_model():
     try:
-        model = tf.keras.models.load_model("keras_model.h5", compile=False)
-        
-        # TRUCO MAESTRO: Si el servidor usa Keras 3, esto repara las dimensiones de entrada en vivo
-        if hasattr(model, 'layers') and len(model.layers) > 0:
-            try:
-                model.layers[0]._batch_input_shape = (None, 224, 224, 3)
-            except Exception:
-                pass
-                
-        return model
-    except Exception as e:
-        st.error(f"Error crítico al cargar 'keras_model.h5': {e}")
-        return None
+        import onnxruntime as ort
+        # Si tienes el modelo convertido a .onnx, lo lee directo
+        if os.path.exists("model.onnx"):
+            return ort.InferenceSession("model.onnx"), "onnx"
+    except Exception:
+        pass
+    return None, None
+
+# Intentar cargar usando TensorFlow (Si el entorno lo permite en el futuro)
+def load_tf_model():
+    try:
+        import tensorflow as tf
+        if os.path.exists("keras_model.h5"):
+            model = tf.keras.models.load_model("keras_model.h5", compile=False)
+            return model, "tf"
+    except Exception:
+        pass
+    return None, None
 
 # Cargar las etiquetas de clases
 def load_labels():
@@ -42,52 +43,60 @@ def load_labels():
             classes = []
             for line in lines:
                 parts = line.strip().split(" ", 1)
-                if len(parts) > 1:
-                    classes.append(parts[1])
-                else:
-                    classes.append(parts[0])
+                classes.append(parts[1] if len(parts) > 1 else parts[0])
             return classes
     except FileNotFoundError:
-        st.error("No se encontró el archivo 'labels.txt' en la ruta actual.")
         return []
 
-# Inicializar modelo y etiquetas
-model = load_teachable_model()
+# Inicializar motor de inferencia inteligente
+model, motor = load_onnx_model()
+if model is None:
+    model, motor = load_tf_model()
+
 class_names = load_labels()
 
-if model is not None and len(class_names) > 0:
-    st.success("✅ ¡Sistema listo y cargado correctamente en internet!")
+# Interfaz de Usuario
+if class_names:
+    if model is not None:
+        st.success(f"✅ ¡Sistema listo en internet! (Motor activo: {motor.upper()})")
+    else:
+        # Modo de contingencia educativa por si TensorFlow falla en la nube
+        st.warning("⚠️ El servidor de la nube no soporta TensorFlow pesado por incompatibilidad de Python.")
+        st.info("💡 Para activar el clasificador 100% online gratis: descarga la versión de tu modelo en formato 'TensorFlow Lite' o 'ONNX' desde Teachable Machine, nómbralo 'model.onnx' y súbelo a este GitHub.")
     
     uploaded_file = st.file_uploader("Selecciona una imagen (JPG, JPEG o PNG)...", type=["jpg", "jpeg", "png"])
 
     if uploaded_file is not None:
         image = Image.open(uploaded_file).convert("RGB")
-        st.image(image, caption="Imagen cargada para análisis", use_container_width=True)
+        st.image(image, caption="Imagen cargada", use_container_width=True)
         
-        st.write("🔮 *Procesando predicción...*")
+        st.write("🔮 *Procesando análisis...*")
         
-        # --- PREPROCESAMIENTO ESTÁNDAR DE TEACHABLE MACHINE ---
+        # Preprocesamiento estándar
         size = (224, 224)
         image_resized = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
         image_array = np.asarray(image_resized)
         normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
+        data = np.expand_dims(normalized_image_array, axis=0)
         
-        data = np.ndarray(shape=(1, 224, 224, 3), dtype=np.float32)
-        data[0] = normalized_image_array
+        # Ejecutar predicción según el motor disponible
+        prediction = None
+        if motor == "tf":
+            prediction = model.predict(data, verbose=0)[0]
+        elif motor == "onnx":
+            input_name = model.get_inputs()[0].name
+            prediction = model.run(None, {input_name: data})[0][0]
         
-        # --- EJECUTAR INFERENCIA ---
-        prediction = model.predict(data, verbose=0)
-        highest_prob_index = np.argmax(prediction[0])
-        predicted_class = class_names[highest_prob_index]
-        confidence_score = prediction[0][highest_prob_index]
-        
-        # --- MOSTRAR RESULTADOS ---
-        st.markdown("---")
-        st.subheader("📊 Resultado del Análisis")
-        st.metric(label="Clase Detectada", value=predicted_class, delta=f"{confidence_score * 100:.2f}% Confianza")
-        
-        st.write("### Desglose de Probabilidades:")
-        chart_data = {class_names[i]: float(prediction[0][i]) for i in range(len(class_names))}
-        st.bar_chart(chart_data)
+        if prediction is not None:
+            highest_prob_index = np.argmax(prediction)
+            predicted_class = class_names[highest_prob_index]
+            confidence_score = prediction[highest_prob_index]
+            
+            st.markdown("---")
+            st.subheader("📊 Resultado del Análisis")
+            st.metric(label="Clase Detectada", value=predicted_class, delta=f"{confidence_score * 100:.2f}% Confianza")
+            
+            chart_data = {class_names[i]: float(prediction[i]) for i in range(len(class_names))}
+            st.bar_chart(chart_data)
 else:
-    st.warning("⚠️ Asegúrate de tener 'keras_model.h5' y 'labels.txt' en tu repositorio.")
+    st.error("❌ No se encontró el archivo 'labels.txt' en tu GitHub.")
