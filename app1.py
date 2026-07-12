@@ -16,11 +16,19 @@ st.write("Carga una imagen y el modelo entrenado en Teachable Machine realizará
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-# Función optimizada con parches de compatibilidad automáticos
+# Función optimizada con parches de compatibilidad automáticos para Keras 3 en la nube
 @st.cache_resource
 def load_teachable_model():
     try:
         model = tf.keras.models.load_model("keras_model.h5", compile=False)
+        
+        # TRUCO MAESTRO: Si el servidor usa Keras 3, esto repara las dimensiones de entrada en vivo
+        if hasattr(model, 'layers') and len(model.layers) > 0:
+            try:
+                model.layers[0]._batch_input_shape = (None, 224, 224, 3)
+            except Exception:
+                pass
+                
         return model
     except Exception as e:
         st.error(f"Error crítico al cargar 'keras_model.h5': {e}")
@@ -58,7 +66,7 @@ if model is not None and len(class_names) > 0:
         
         st.write("🔮 *Procesando predicción...*")
         
-        # --- PREPROCESAMIENTO ESTÁNDAR ---
+        # --- PREPROCESAMIENTO ESTÁNDAR DE TEACHABLE MACHINE ---
         size = (224, 224)
         image_resized = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
         image_array = np.asarray(image_resized)
